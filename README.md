@@ -1,85 +1,83 @@
 # LLM Observability Platform
 
-一个 LLM 调用的可观测性平台。工作方式是作为代理层挡在你的应用和各个 LLM 服务之间，拦截每次 API 调用，把模型、token 用量、延迟、费用这些信息记录下来，然后提供一个 Dashboard 让你看到成本都花在了哪里。
+一个 LLM 调用的可观测性平台。以代理方式运行在你的应用和各种 LLM 服务之间，拦截每次 API 调用，记录模型、token 用量、延迟和费用，同时提供 Dashboard 查看成本分布。
 
-背景：找实习的时候需要一个能展示后端能力和 LLM 方向兴趣的项目。做了这个。
+## 解决的问题
 
-## 解决了什么问题
+在代码里直接调 OpenAI 或 Claude 的 API 有三个常见痛点：
 
-如果你在代码里直接调 OpenAI 或者 Claude 的 API，会遇到几个麻烦：
+- 费用不可见：月底看账单才发现异常调用，没有实时视图
+- 无法回溯：用户反馈某次对话有问题，但查不到当时的 prompt 和 response
+- Key 混用：多个服务共用一个 API Key，A 服务的 bug 可能耗尽整个配额
 
-- **不知道花了多少钱**。到月底看账单才发现有一笔异常调用，但已经晚了。
-- **出问题没法回溯**。用户反馈说某次对话答非所问，你想查一下那次调用的 prompt 和 response，发现根本没记。
-- **多个服务共用一个 Key**。A 应用的 bug 导致疯狂调用，把整个 Key 的配额用光了，B 应用跟着挂。
+这个平台让每次 LLM 调用变得可追踪：
 
-这个平台让每次 LLM 调用都**有据可查**：
+1. 请求经由平台转发，自动记录请求体和响应体
+2. 通过 API Key 隔离不同服务，各自独立统计
+3. 内存计数器提供实时用量和费用视图
 
-1. 所有请求经过平台转发，自动记录请求体和响应体
-2. 按 API Key 隔离，每个服务发一个独立的 Key，谁的问题一目了然
-3. 实时统计调用次数和费用，异常飙升能立刻发现
+## 与 CC Switch 的关系
 
-## 跟 CC Switch 的区别
-
-[CC Switch](https://github.com/nicepkg/ccswitch) 是一个桌面应用，面向个人开发者，帮你切换不同 LLM 供应商的配置。它解决的问题是"在 Claude Code / Codex / Gemini CLI 这些工具之间切配置太麻烦"。
-
-这个项目是一个后端服务，面向的是**程序**而不是人。你的应用代码通过 HTTP 调它，它转发到真实的 LLM，顺带记录观测数据。两者的定位不一样——CC Switch 是工具，这里是中间件。
+[CC Switch](https://github.com/nicepkg/ccswitch) 是一个桌面应用，面向个人开发者管理多个 LLM 供应商的配置。这里解决的是另一个问题：作为后端中间件，为调用方提供统一的接入入口和观测能力。应用代码通过 HTTP 调用平台，平台负责转发、记录和统计。
 
 ## 项目结构
 
 ```
 ├── app/
-│   ├── main.py                  # FastAPI 入口，lifespan 里做建表和启停 Worker
-│   ├── config.py                # 所有配置项，通过环境变量控制
+│   ├── main.py                  # FastAPI 入口，lifespan 负责建表和启停 Worker
+│   ├── config.py                # 配置项，通过环境变量控制
 │   ├── core/
-│   │   └── database.py          # SQLAlchemy 异步引擎，建表逻辑
+│   │   └── database.py          # SQLAlchemy 异步引擎，自动建表
 │   ├── models/
-│   │   ├── api_key.py           # API Key 的表定义
-│   │   └── trace_record.py      # 调用记录的表定义
+│   │   ├── api_key.py           # API Key 表
+│   │   └── trace_record.py      # 调用记录表
 │   ├── schemas/
-│   │   ├── api_key.py           # 请求/响应的数据结构
-│   │   └── trace.py             # Trace 和 Dashboard 的数据结构
+│   │   ├── api_key.py           # 请求/响应的 Pydantic 模型
+│   │   └── trace.py             # Trace 和 Dashboard 的 Pydantic 模型
 │   ├── api/
-│   │   ├── proxy.py             # 代理端点：收请求 → 转发 → 记录
-│   │   ├── keys.py              # API Key 的增删改查
+│   │   ├── proxy.py             # POST /v1/chat/completions 代理端点
+│   │   ├── keys.py              # API Key CRUD
 │   │   └── dashboard.py         # Dashboard 数据接口
 │   ├── services/
-│   │   ├── llm_adapter.py       # 不同 LLM 供应商的调用适配
-│   │   └── write_worker.py      # 异步写库 + 内存计数器
+│   │   ├── llm_adapter.py       # 多供应商调用适配
+│   │   └── write_worker.py      # 异步写入 Worker + 内存计数器
 │   └── middleware/
-│       └── api_key_auth.py      # 从 HTTP Header 里取 Key 做鉴权
+│       └── api_key_auth.py      # Bearer Token 鉴权
 ├── tests/
-│   ├── conftest.py              # pytest 配置，用 SQLite 内存库做隔离
-│   └── test_keys.py             # API Key 的测试用例
-├── docker-compose.yml           # PostgreSQL（生产模式用）
+│   ├── conftest.py              # pytest 配置，SQLite 内存数据库隔离
+│   └── test_keys.py             # API Key 测试
+├── docker-compose.yml           # PostgreSQL 容器
 ├── requirements.txt
 └── pytest.ini
 ```
 
-## 各个模块做了什么
+## 模块说明
 
 ### 代理端点 — `app/api/proxy.py`
 
-这是整个平台最核心的部分。它暴露了一个 `POST /v1/chat/completions`，请求格式跟 OpenAI 的 Chat Completions API 完全一致。你的代码只需要把 `base_url` 从 `https://api.openai.com` 改成 `http://localhost:8000` 就行了，其他地方不用动。
+暴露 `POST /v1/chat/completions`，兼容 OpenAI Chat Completions API。接入方只需把 `base_url` 改为平台地址，其余代码不变。
 
-收到请求后的流程：
+请求处理流程：
 
-1. 从 `Authorization: Bearer sk-xxx` 里取出 API Key，查 `api_keys` 表确认这个 Key 有效
-2. 看请求里的 `model` 字段——支持 `openai/gpt-4o` 这种格式，自动拆成供应商和模型名
-3. 把请求转发给真正的 LLM 服务，拿到响应
-4. 把这次的 token 用量、延迟、费用扔进 `asyncio.Queue`，**不等写入完成就直接把响应返回给用户**
-5. 同时更新内存计数器
+1. 从 `Authorization: Bearer sk-xxx` 提取 API Key，查 `api_keys` 表验证有效性
+2. 解析 `model` 字段——`openai/gpt-4o` 格式自动拆分为供应商和模型名
+3. 将请求转发给目标 LLM 服务
+4. 将 token 用量、延迟、费用等观测数据放入 `asyncio.Queue`，立即返回响应给客户端
+5. 同步更新内存计数器
 
-也就是说，记录观测数据不会拖慢用户的请求。后台有个 Worker 专门负责把队列里的数据批量写进数据库。
+记录观测数据不阻塞主链路。后台 Worker 负责批量写入数据库。
 
 ### 异步写入 — `app/services/write_worker.py`
 
-这块拆成了两层：
+分为两层：
 
-**内存计数器（StatsCache）**：一个 Python 字典，结构大概是这样：
+**StatsCache（内存计数器）**：一个 Python dict，按 API Key 和模型维度聚合调用次数、费用和 token 数。代理请求完成后同步更新，Dashboard 首页直接读取，查询延迟为纳秒级。
+
+数据结构示例：
 
 ```python
 {
-  "key_abc的id": {
+  "<api_key_id>": {
     "calls": 42,
     "cost": 0.123,
     "tokens": 5000,
@@ -92,197 +90,139 @@
 }
 ```
 
-每次代理转发完一笔请求，就同步更新这个字典（纳秒级）。Dashboard 的首页直接读这份内存数据，所以**永远是最新的**，不会有"刚调完但 Dashboard 看不到"的问题。
-
-**后台 Worker**：一个 `asyncio.Task`，死循环从 `asyncio.Queue` 里取观测数据，攒够 50 条或者过了 5 秒就批量写入数据库。服务器关闭时会把队列里剩下的数据全部刷盘，不丢失。
+**后台 Worker**：一个 `asyncio.Task`，从 `asyncio.Queue` 取出观测数据，攒够 50 条或间隔 5 秒后批量 INSERT。服务关闭时刷掉队列中剩余数据。
 
 ### 模型适配器 — `app/services/llm_adapter.py`
 
-不同 LLM 供应商的 API 格式不一样。比如 OpenAI 的请求长这样：
+不同供应商的请求/响应格式存在差异。适配器负责：
 
-```json
-{"model": "gpt-4o", "messages": [{"role": "user", "content": "..."}]}
-```
+- 将统一的内部格式转换为各供应商要求的格式
+- 将响应标准化为统一结构
+- 根据模型定价表估算每次调用的费用
 
-而 Anthropic（Claude）的要求是：
+当前支持的供应商：
 
-```json
-{"model": "claude-sonnet", "messages": [{"role": "user", "content": "..."}], "max_tokens": 4096}
-```
-
-这个适配器负责把请求转成各个供应商认的格式，并且把响应统一回来。加了新供应商就多写一个方法，不影响现有逻辑。
-
-目前支持：
-- OpenAI 兼容格式（GPT、DeepSeek、千问、智谱等）
+- OpenAI 兼容（GPT、DeepSeek、千问、智谱等）
 - Anthropic（Claude）
-
-费用估算：内置了一个价格表，不同模型按不同的输入/输出 token 单价计算。价格硬编码在代码里，后续可以挪到配置或数据库里。
 
 ### API Key 管理 — `app/api/keys.py`
 
-每个接入的服务发一个独立的 Key。创建时生成 `sk-` 开头的随机字符串，可以设置每分钟的调用上限。禁用某个 Key 后使用它的请求会直接返回 401。
-
-这个是实现"多租户隔离"的最小可用方案——不需要注册登录那一套，但每个 Key 的数据完全隔开。
+为每个接入方分配独立的 API Key，生成 `sk-` 前缀的随机字符串。支持设置每分钟调用上限，以及启用/禁用操作。禁用后使用该 Key 的请求直接返回 401。
 
 ### Dashboard — `app/api/dashboard.py`
 
-提供三个查询接口：
+提供以下接口：
 
-- `/api/dashboard/summary` — 首页概览，数据来自内存计数器，实时返回
-- `/api/dashboard/cost-by-model?days=7` — 从数据库查历史数据，按模型拆分过去 N 天的费用。面试的时候可以用来展示 SQL 聚合查询的能力
-- `/api/traces` — 调用记录明细，支持按 Key、模型、状态筛选
+| 接口 | 数据来源 | 说明 |
+|------|---------|------|
+| `/api/dashboard/summary` | 内存计数器 | 实时总览 |
+| `/api/dashboard/cost-by-model?days=7` | 数据库 | 按模型拆分历史成本 |
+| `/api/traces` | 数据库 | 调用明细，支持按 Key、模型、状态筛选 |
+| `/api/traces/{id}` | 数据库 | 单条调用详情，含请求体和响应体 |
 
 ## 环境要求
 
-- Python 3.11 或更高
-- Conda（推荐，当然 pip + venv 也一样）
-- Docker Desktop（可选的，只在你需要用 PostgreSQL 替代 SQLite 时需要）
+- Python 3.11+
+- Docker Desktop（可选，仅 PostgreSQL 模式需要）
 
-## 怎么跑起来
+## 启动
 
-### 1. 装依赖
+### 1. 安装依赖
 
 ```bash
-# 创建 conda 环境
 conda create -n llm-obs python=3.11 -y
 conda activate llm-obs
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-如果你是 Windows + conda 环境，有可能会遇到 SSL 证书找不到的问题。报错的话先执行：
+Windows + conda 环境下如遇到 SSL 证书报错，执行：
 
-```bash
+```powershell
 $env:SSL_CERT_FILE = (python -c "import certifi; print(certifi.where())")
 ```
 
-然后就可以启动服务了：
+### 2. 启动服务
+
+SQLite 模式（默认，无需 Docker）：
 
 ```bash
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-打开 http://localhost:8000/docs 可以看到 Swagger 文档，直接在里面测试接口。
+PostgreSQL 模式：
 
-### 2. 走一遍完整流程
+```bash
+docker compose up -d                     # 启动 PG 容器
+# 修改 .env 中 USE_SQLITE=false
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
 
-**创建一个 API Key**：
+如果 Docker 拉取镜像失败，可在 Docker Engine 配置中添加镜像加速：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://dockerhub.timeweb.cloud"
+  ]
+}
+```
+
+服务启动后访问 http://localhost:8000/docs 查看 Swagger 文档。
+
+### 3. 使用示例
+
+**创建 API Key**：
 
 ```bash
 curl -X POST http://localhost:8000/api/keys \
   -H "Content-Type: application/json" \
-  -d '{"name": "我的测试应用", "rate_limit": 60}'
+  -d '{"name": "my-app", "rate_limit": 60}'
 ```
 
-返回：
+返回的 `key` 字段即用于鉴权的 Bearer Token。
 
-```json
-{
-  "id": "c41873dc-...",
-  "key": "sk-w3r6VmyvOpJRkIe5...",
-  "name": "我的测试应用",
-  "rate_limit": 60,
-  "is_active": true
-}
+**通过代理调用 LLM**：
+
+先设置上游 API Key：
+
+```powershell
+$env:LLM_KEY_OPENAI = "sk-your-openai-key"
 ```
 
-记下返回的 `key`。
-
-**通过代理调一次 LLM**：
-
-你需要先在系统环境变量里设置真实的 API Key：
-
-```bash
-# Windows PowerShell
-$env:LLM_KEY_OPENAI = "sk-你的真实OpenAIKey"
-```
-
-然后发请求，注意 `Authorization` 用刚才创建的 Key，`model` 用 `供应商/模型名` 格式：
+发起请求，`Authorization` 使用平台 Key，`model` 使用 `供应商/模型名` 格式：
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-w3r6VmyvOpJRkIe5..." \
+  -H "Authorization: Bearer sk-xxx" \
   -d '{
     "model": "openai/gpt-4o-mini",
-    "messages": [{"role": "user", "content": "用一句话解释什么是RESTful API"}]
+    "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
 
-返回的就是 OpenAI 的标准响应，跟直连没区别：
-
-```json
-{
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "choices": [{"message": {"content": "RESTful API 是一种..."}}],
-  "usage": {"prompt_tokens": 20, "completion_tokens": 80, "total_tokens": 100}
-}
-```
-
-**看 Dashboard**：
+**查看统计**：
 
 ```bash
 curl http://localhost:8000/api/dashboard/summary
 ```
 
-你会看到刚才的调用已经被统计进去了：
-
-```json
-{
-  "total_calls_today": 1,
-  "total_cost_today": 0.000065,
-  "total_tokens_today": 100,
-  "error_rate_today": 0.0,
-  "active_keys": 1,
-  "by_model": [
-    {
-      "model": "gpt-4o-mini",
-      "calls": 1,
-      "total_cost": 0.000065,
-      "total_tokens": 100
-    }
-  ]
-}
-```
-
-### 3. 跑测试
+### 4. 运行测试
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-测试用的是 SQLite 内存数据库，每次测试前重建表，测试后回滚，不影响你的开发数据。
+测试使用 SQLite 内存数据库，每次测试前建表、测试后回滚。
 
-## 数据库切换
+## 设计选择
 
-开发的时候默认用 SQLite，clone 下来就能跑，不用配置任何东西。
-
-如果你想切到 PostgreSQL（比如面试时想展示 SQL 优化能力），操作步骤：
-
-1. 启动 Docker Desktop
-2. `docker compose up -d`（启动 PostgreSQL 容器）
-3. 修改 `.env` 文件中的 `USE_SQLITE=false`
-4. 重启服务
-
-如果 Docker Desktop 拉不下镜像（国内环境常见），在 Settings → Resources → Proxies 里配置 HTTP 代理，或者用阿里云的容器镜像服务。
-
-## 一些设计选择
-
-| 做了什么 | 为什么这样做 |
-|----------|------------|
-| 开发用 SQLite，生产用 PG | clone 下来零配置跑起来，真正上线时 PG 的 JSONB 和窗口函数更适合统计分析 |
-| 异步队列写库 | 不想让观测数据的写入拖慢请求响应。队列解耦后主链路不受影响 |
-| 内存做热点统计 | 用户刚调完查 Dashboard 应该是瞬间看到最新数据，不用等 Worker 写完 PG |
-| 直接用 httpx 调 LLM | 不想引入 LangChain 那一套。适配器加起来不到 200 行，逻辑完全在自己手里 |
-| API Key 做多租户 | 比完整的用户系统轻量太多，但隔离效果够用 |
-| UUID 存成字符串 | SQLite 和 PG 都认，不用担心迁移问题 |
-
-## TODO（按优先级）
-
-- [ ] Dashboard HTML 页面，用 Chart.js 画成本趋势图
-- [ ] 数据自动清理（trace_records 只保留 30 天）
-- [ ] 模型配置页面（价格、供应商、fallback 规则）
-- [ ] 链路追踪（trace_id 串联多步调用）
-- [ ] 质量告警（响应变慢、错误率高时提醒）
+| 选择 | 原因 |
+|------|------|
+| 开发用 SQLite，生产用 PostgreSQL | clone 即跑，无需额外配置；PG 的 JSONB 和窗口函数更适合统计分析 |
+| 异步队列批量写入 | 观测数据写入不阻塞请求主链路 |
+| 内存计数器做热点统计 | Dashboard 首页查询为纳秒级，不受 Worker 写入延迟影响 |
+| 直接用 httpx 调 LLM | 避免引入 LangChain 等重框架，适配器约 200 行 |
+| API Key 做多租户隔离 | 比完整用户系统轻量，隔离效果满足需求 |
+| UUID 存为字符串 | SQLite 和 PG 通用，避免迁移成本 |
