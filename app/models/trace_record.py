@@ -53,7 +53,7 @@ class TraceRecord(Base):
 
     # ── 时间戳 ──
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, index=True
+        DateTime(timezone=True), default=_utcnow, index=True
     )
 
     __table_args__ = (

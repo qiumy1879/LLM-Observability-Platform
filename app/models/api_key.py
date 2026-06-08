@@ -28,5 +28,5 @@ class ApiKey(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow
+        DateTime(timezone=True), default=_utcnow
     )
