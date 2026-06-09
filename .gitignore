@@ -2,9 +2,6 @@
 .claude/
 .sixth/
 
-# Documentation (keep locally, not in git)
-docs/
-
 # Python
 __pycache__/
 *.py[cod]
