@@ -42,6 +42,14 @@ async def health():
     return {"status": "healthy", "version": "0.1.0"}
 
 
+@app.get("/")
+async def dashboard_page():
+    from fastapi.responses import FileResponse
+    import os
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    return FileResponse(os.path.join(static_dir, "dashboard.html"))
+
+
 # ── 注册路由（延迟导入避免循环依赖）──
 from app.api import proxy, keys, dashboard  # noqa: E402
 

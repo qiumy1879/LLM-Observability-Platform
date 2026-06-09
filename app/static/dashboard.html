@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Observability — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d38;
+    --text: #e1e4eb;
+    --muted: #8b8fa3;
+    --green: #34d399;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --accent: #818cf8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .header { background: var(--card); border-bottom: 1px solid var(--border); padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header .badge { background: var(--accent); color: #fff; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+  .container { max-width: 1280px; margin: 0 auto; padding: 24px 32px; }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .card .label { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; }
+  .card .value.green { color: var(--green); }
+  .card .value.red { color: var(--red); }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .panel h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--muted); }
+  .chart-wrap { position: relative; height: 280px; }
+  .chart-wrap canvas { width: 100% !important; }
+  .full-panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .full-panel h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .tag.ok { background: rgba(52,211,153,0.15); color: var(--green); }
+  .tag.err { background: rgba(248,113,113,0.15); color: var(--red); }
+  .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
+  .refresh { font-size: 12px; color: var(--muted); margin-left: 8px; }
+  .empty { text-align: center; color: var(--muted); padding: 40px; font-size: 14px; }
+  @media (max-width: 768px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .row { grid-template-columns: 1fr; }
+    .container { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>LLM Observability</h1>
+  <span class="badge">v0.1</span>
+</div>
+
+<div class="container">
+
+  <!-- Summary Cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">今日调用次数</div>
+      <div class="value" id="total-calls">—</div>
+      <div class="sub" id="active-keys">活跃 Key: —</div>
+    </div>
+    <div class="card">
+      <div class="label">今日费用</div>
+      <div class="value green" id="total-cost">—</div>
+      <div class="sub">USD</div>
+    </div>
+    <div class="card">
+      <div class="label">今日 Token</div>
+      <div class="value" id="total-tokens">—</div>
+      <div class="sub">输入 + 输出</div>
+    </div>
+    <div class="card">
+      <div class="label">错误率</div>
+      <div class="value" id="error-rate" style="color:var(--red)">—</div>
+      <div class="sub">今日</div>
+    </div>
+  </div>
+
+  <!-- Charts Row -->
+  <div class="row">
+    <div class="panel">
+      <h2>各模型费用占比</h2>
+      <div class="chart-wrap"><canvas id="cost-chart"></canvas></div>
+    </div>
+    <div class="panel">
+      <h2>各模型调用次数</h2>
+      <div class="chart-wrap"><canvas id="calls-chart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Recent Traces -->
+  <div class="full-panel">
+    <h2>最近调用记录 <span class="refresh" id="refresh-status">自动刷新: 5s</span></h2>
+    <table id="traces-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>模型</th>
+          <th>供应商</th>
+          <th>延迟</th>
+          <th>Token</th>
+          <th>费用</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="traces-empty">暂无调用记录</div>
+  </div>
+
+  <!-- API Key 管理 -->
+  <div class="full-panel">
+    <h2>API Keys</h2>
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <input type="text" id="key-name" placeholder="Key 名称" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:14px;width:200px;">
+      <button onclick="createKey()" style="background:var(--accent);color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:14px;">创建 Key</button>
+    </div>
+    <div id="key-result" style="font-size:12px;color:var(--green);margin-bottom:12px;word-break:break-all;"></div>
+    <table id="keys-table">
+      <thead><tr><th>名称</th><th>Key 前缀</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+const API = '';
+
+// ── Colors ──
+const COLORS = ['#818cf8','#34d399','#fbbf24','#f87171','#60a5fa','#a78bfa','#fb923c','#4ade80'];
+
+// ── Fetch & Render ──
+async function refresh() {
+  try {
+    const res = await fetch(`${API}/api/dashboard/summary`);
+    const data = await res.json();
+    renderCards(data);
+    renderCharts(data);
+  } catch(e) { console.error(e); }
+
+  try {
+    const res = await fetch(`${API}/api/traces?limit=20`);
+    const traces = await res.json();
+    renderTraces(traces);
+  } catch(e) { console.error(e); }
+
+  try {
+    const res = await fetch(`${API}/api/keys`);
+    const keys = await res.json();
+    renderKeys(keys);
+  } catch(e) { console.error(e); }
+}
+
+function renderCards(d) {
+  document.getElementById('total-calls').textContent = d.total_calls_today.toLocaleString();
+  document.getElementById('total-cost').textContent = '$' + d.total_cost_today.toFixed(6);
+  document.getElementById('total-tokens').textContent = d.total_tokens_today.toLocaleString();
+  const err = (d.error_rate_today * 100).toFixed(1) + '%';
+  document.getElementById('error-rate').textContent = err;
+  document.getElementById('error-rate').style.color = d.error_rate_today > 0.05 ? 'var(--red)' : 'var(--green)';
+  document.getElementById('active-keys').textContent = '活跃 Key: ' + d.active_keys;
+}
+
+let costChart = null, callsChart = null;
+
+function renderCharts(d) {
+  const byModel = d.by_model || [];
+  const labels = byModel.map(m => m.model);
+  const costs = byModel.map(m => m.total_cost);
+  const calls = byModel.map(m => m.calls);
+
+  const ctx1 = document.getElementById('cost-chart').getContext('2d');
+  if (costChart) costChart.destroy();
+  if (labels.length === 0) {
+    costChart = new Chart(ctx1, { type: 'doughnut', data: { labels: ['暂无数据'], datasets: [{ data: [1], backgroundColor: ['#2a2d38'] }] }, options: { plugins: { legend: { display: false } } } });
+  } else {
+    costChart = new Chart(ctx1, {
+      type: 'doughnut',
+      data: { labels, datasets: [{ data: costs, backgroundColor: COLORS, borderColor: '#1a1d27', borderWidth: 2 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#8b8fa3', padding: 12, font: { size: 12 }, usePointStyle: true } },
+          tooltip: { callbacks: { label: ctx => ` $${ctx.raw.toFixed(6)}` } }
+        }
+      }
+    });
+  }
+
+  const ctx2 = document.getElementById('calls-chart').getContext('2d');
+  if (callsChart) callsChart.destroy();
+  if (labels.length === 0) {
+    callsChart = new Chart(ctx2, { type: 'bar', data: { labels: ['暂无数据'], datasets: [{ data: [0], backgroundColor: '#2a2d38' }] }, options: { plugins: { legend: { display: false } } } });
+  } else {
+    callsChart = new Chart(ctx2, {
+      type: 'bar',
+      data: { labels, datasets: [{ data: calls, backgroundColor: COLORS, borderRadius: 6, borderSkipped: false }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8b8fa3', font: { size: 11 } }, grid: { display: false } },
+          y: { ticks: { color: '#8b8fa3', font: { size: 11 } }, grid: { color: '#2a2d38' }, beginAtZero: true }
+        }
+      }
+    });
+  }
+}
+
+function renderTraces(traces) {
+  const tbody = document.querySelector('#traces-table tbody');
+  const empty = document.getElementById('traces-empty');
+  if (!traces || traces.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = traces.map(t => `
+    <tr>
+      <td class="mono">${new Date(t.created_at).toLocaleString('zh-CN')}</td>
+      <td>${t.model}</td>
+      <td class="mono">${t.provider}</td>
+      <td>${t.latency_ms}ms</td>
+      <td>${(t.token_input + t.token_output).toLocaleString()}</td>
+      <td class="mono">$${t.cost.toFixed(6)}</td>
+      <td><span class="tag ${t.status === 'success' ? 'ok' : 'err'}">${t.status}</span></td>
+    </tr>
+  `).join('');
+}
+
+function renderKeys(keys) {
+  const tbody = document.querySelector('#keys-table tbody');
+  if (!keys || keys.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无 Key，请创建一个</td></tr>';
+    return;
+  }
+  tbody.innerHTML = keys.map(k => `
+    <tr>
+      <td>${k.name}</td>
+      <td class="mono">${k.id.slice(0, 8)}...</td>
+      <td><span class="tag ${k.is_active ? 'ok' : 'err'}">${k.is_active ? 'active' : 'disabled'}</span></td>
+      <td class="mono">${new Date(k.created_at).toLocaleString('zh-CN')}</td>
+      <td><button onclick="toggleKey('${k.id}', ${!k.is_active})" style="background:var(--border);color:var(--text);border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;">${k.is_active ? '禁用' : '启用'}</button></td>
+    </tr>
+  `).join('');
+}
+
+async function createKey() {
+  const name = document.getElementById('key-name').value.trim() || 'default';
+  const res = await fetch(`${API}/api/keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, rate_limit: 60 })
+  });
+  if (res.ok) {
+    const key = await res.json();
+    document.getElementById('key-result').textContent = '创建成功！Key: ' + key.key;
+    document.getElementById('key-name').value = '';
+    refresh();
+  }
+}
+
+async function toggleKey(id, active) {
+  await fetch(`${API}/api/keys/${id}?is_active=${active}`, { method: 'PATCH' });
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
