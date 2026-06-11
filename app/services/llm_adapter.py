@@ -4,9 +4,10 @@
   - OpenAI 兼容格式（OpenAI / DeepSeek / 千问 等）
   - Anthropic（Claude）
 
-扩展方式：新增一个 async def call_xxx() 并在 _adapters dict 中注册即可。
+扩展方式：新增一个 async def call_xxx() 并在 call() 中加 elif 即可。
 """
 
+import os
 import time
 import httpx
 from app.config import settings
@@ -60,7 +61,6 @@ class LLMAdapter:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # 替换 body 中的 model（用户可能指定了不同的模型名）
         body = {**body, "model": model}
 
         try:
@@ -71,6 +71,7 @@ class LLMAdapter:
             if resp.status_code >= 400:
                 return {
                     "status": "error",
+                    "upstream_status_code": resp.status_code,
                     "error_message": resp_data.get("error", {}).get("message", str(resp_data)),
                     "response_body": resp_data,
                     "model": model,
@@ -93,6 +94,7 @@ class LLMAdapter:
         except Exception as e:
             return {
                 "status": "error",
+                "upstream_status_code": 502,
                 "error_message": str(e),
                 "model": model,
                 "provider": provider,
@@ -107,7 +109,6 @@ class LLMAdapter:
         """Anthropic Messages API → 内部转为类 OpenAI 格式"""
         url = "https://api.anthropic.com/v1/messages"
 
-        # 将 OpenAI 格式的 messages 转为 Anthropic 格式
         messages = body.get("messages", [])
         system_msg = None
         anthropic_messages = []
@@ -139,6 +140,7 @@ class LLMAdapter:
             if resp.status_code >= 400:
                 return {
                     "status": "error",
+                    "upstream_status_code": resp.status_code,
                     "error_message": resp_data.get("error", {}).get("message", str(resp_data)),
                     "response_body": resp_data,
                     "model": model,
@@ -164,6 +166,7 @@ class LLMAdapter:
         except Exception as e:
             return {
                 "status": "error",
+                "upstream_status_code": 502,
                 "error_message": str(e),
                 "model": model,
                 "provider": provider,
@@ -177,10 +180,28 @@ class LLMAdapter:
             await self._client.aclose()
 
 
-# ── 价格估算（$/token，以官方最新定价为准，面试时可说明这是可配置的）──
+# ── 模型定价（可通过环境变量覆盖）──
+
+def _load_prices() -> dict[str, dict[str, tuple[float, float]]]:
+    """从环境变量加载自定义定价，未配置则使用默认值"""
+    # 格式：LLM_PRICE_OPENAI_GPT4O=0.0000025,0.000010
+    custom: dict[str, dict[str, tuple[float, float]]] = {}
+    for key, val in os.environ.items():
+        if not key.startswith("LLM_PRICE_"):
+            continue
+        parts = key[len("LLM_PRICE_"):].lower().split("_", 1)
+        if len(parts) != 2:
+            continue
+        provider, model_key = parts
+        try:
+            inp, out = val.split(",")
+            custom.setdefault(provider, {})[model_key] = (float(inp), float(out))
+        except (ValueError, IndexError):
+            pass
+    return custom
+
 
 _PRICES: dict[str, dict[str, tuple[float, float]]] = {
-    # (输入价格, 输出价格) 单位：$/token
     "openai": {
         "gpt-4o": (0.0000025, 0.000010),
         "gpt-4o-mini": (0.00000015, 0.0000006),
@@ -196,13 +217,16 @@ _PRICES: dict[str, dict[str, tuple[float, float]]] = {
         "claude-haiku-4-5": (0.0000008, 0.000004),
     },
 }
-
-_DEFAULT_PRICE = (0.000001, 0.000005)  # 未知模型默认价格
+_DEFAULT_PRICE = (0.000001, 0.000005)
 
 
 def _estimate_cost(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
-    """根据模型定价估算本次调用费用"""
-    prices = _PRICES.get(provider, {}).get(model, _DEFAULT_PRICE)
+    """根据模型定价估算本次调用费用。先查环境变量覆盖，再查内置价格表。"""
+    custom = _load_prices()
+    if provider in custom and model in custom[provider]:
+        prices = custom[provider][model]
+    else:
+        prices = _PRICES.get(provider, {}).get(model, _DEFAULT_PRICE)
     cost = input_tokens * prices[0] + output_tokens * prices[1]
     return round(cost, 8)
 

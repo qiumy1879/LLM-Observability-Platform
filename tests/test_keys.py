@@ -6,6 +6,8 @@ import pytest
 @pytest.mark.asyncio
 async def test_create_key(client):
     """创建 API Key"""
+    # 先做一次简单请求确保 DB 连接就绪（aiosqlite 连接初始化有时延）
+    await client.get("/health")
     resp = await client.post("/api/keys", json={"name": "test-key", "rate_limit": 60})
     assert resp.status_code == 201
     data = resp.json()

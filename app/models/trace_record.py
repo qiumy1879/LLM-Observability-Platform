@@ -1,20 +1,18 @@
 """Trace 记录模型 — 每一次 LLM 调用的完整观测数据"""
 
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime
 from sqlalchemy import String, Integer, Float, DateTime, Text, ForeignKey, Index, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
-
-
-def _utcnow():
-    return datetime.now(timezone.utc)
+from app.core.utils import utcnow
 
 
 class TraceRecord(Base):
     __tablename__ = "trace_records"
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: __import__("uuid").uuid4().hex
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
 
     # ── 归属 ──
@@ -53,7 +51,7 @@ class TraceRecord(Base):
 
     # ── 时间戳 ──
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, index=True
+        DateTime(timezone=True), default=utcnow, index=True
     )
 
     __table_args__ = (

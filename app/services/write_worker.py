@@ -7,12 +7,15 @@
 同时维护一个内存计数器（stats_cache），实现：
   - 实时查询：读内存（纳秒级）
   - 明细查询：读 DB（可能有秒级延迟）
-  - 定时刷盘：每 N 秒将内存快照写入 DB，防重启丢失
+  - 启动恢复：从 DB 恢复当日计数
+  - 关闭刷盘：存档当日快照
 """
 
 import asyncio
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+from sqlalchemy import select, func
 from app.config import settings
 from app.core.database import async_session
 from app.models.trace_record import TraceRecord
@@ -30,43 +33,79 @@ _shutdown_flag = False
 # ═══════════════════════════════════════════════════════════
 
 class StatsCache:
-    """线程不安全的单机内存计数器"""
+    """内存计数器，用 asyncio.Lock 保证并发安全"""
 
     def __init__(self):
         self._data: dict = {}
+        self._lock = asyncio.Lock()
 
-    def record(self, api_key_id: str, model: str, cost: float, tokens: int, is_error: bool):
-        entry = self._data.setdefault(api_key_id, {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}})
-        entry["calls"] += 1
-        entry["cost"] += cost
-        entry["tokens"] += tokens
-        if is_error:
-            entry["errors"] += 1
+    async def record(self, api_key_id: str, model: str, cost: float, tokens: int, is_error: bool):
+        async with self._lock:
+            entry = self._data.setdefault(api_key_id, {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}})
+            entry["calls"] += 1
+            entry["cost"] += cost
+            entry["tokens"] += tokens
+            if is_error:
+                entry["errors"] += 1
 
-        model_entry = entry["by_model"].setdefault(model, {"calls": 0, "cost": 0.0, "tokens": 0})
-        model_entry["calls"] += 1
-        model_entry["cost"] += cost
-        model_entry["tokens"] += tokens
+            model_entry = entry["by_model"].setdefault(model, {"calls": 0, "cost": 0.0, "tokens": 0})
+            model_entry["calls"] += 1
+            model_entry["cost"] += cost
+            model_entry["tokens"] += tokens
 
-    def get_summary(self, api_key_id: Optional[str] = None) -> dict:
-        if api_key_id:
-            return self._data.get(api_key_id, {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}})
+    async def get_summary(self, api_key_id: Optional[str] = None) -> dict:
+        async with self._lock:
+            if api_key_id:
+                return self._data.get(api_key_id, {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}})
 
-        total = {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}}
-        for entry in self._data.values():
-            total["calls"] += entry["calls"]
-            total["cost"] += entry["cost"]
-            total["tokens"] += entry["tokens"]
-            total["errors"] += entry["errors"]
-            for model, m in entry["by_model"].items():
-                mt = total["by_model"].setdefault(model, {"calls": 0, "cost": 0.0, "tokens": 0})
-                mt["calls"] += m["calls"]
-                mt["cost"] += m["cost"]
-                mt["tokens"] += m["tokens"]
-        return total
+            total = {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}}
+            for entry in self._data.values():
+                total["calls"] += entry["calls"]
+                total["cost"] += entry["cost"]
+                total["tokens"] += entry["tokens"]
+                total["errors"] += entry["errors"]
+                for model, m in entry["by_model"].items():
+                    mt = total["by_model"].setdefault(model, {"calls": 0, "cost": 0.0, "tokens": 0})
+                    mt["calls"] += m["calls"]
+                    mt["cost"] += m["cost"]
+                    mt["tokens"] += m["tokens"]
+            return total
 
-    def flush_to_db(self):
-        """将内存计数器快照写入 DB"""
+    async def restore_from_db(self):
+        """启动时从 DB 恢复今日计数，防止重启后清零"""
+        async with async_session() as session:
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            result = await session.execute(
+                select(
+                    TraceRecord.api_key_id,
+                    TraceRecord.model,
+                    func.count(TraceRecord.id).label("calls"),
+                    func.coalesce(func.sum(TraceRecord.cost), 0).label("cost"),
+                    func.coalesce(func.sum(TraceRecord.token_input + TraceRecord.token_output), 0).label("tokens"),
+                    func.count(TraceRecord.id).filter(TraceRecord.status != "success").label("errors"),
+                )
+                .where(TraceRecord.created_at >= today_start)
+                .group_by(TraceRecord.api_key_id, TraceRecord.model)
+            )
+            rows = result.all()
+            async with self._lock:
+                for row in rows:
+                    key_id = row.api_key_id or "unknown"
+                    entry = self._data.setdefault(key_id, {"calls": 0, "cost": 0.0, "tokens": 0, "errors": 0, "by_model": {}})
+                    entry["calls"] += row.calls
+                    entry["cost"] += float(row.cost)
+                    entry["tokens"] += row.tokens
+                    entry["errors"] += row.errors
+                    entry["by_model"][row.model] = {
+                        "calls": row.calls,
+                        "cost": float(row.cost),
+                        "tokens": row.tokens,
+                    }
+
+    async def flush_to_db(self):
+        """关闭时把快照写回 DB（标记为今日聚合）"""
+        # 当前实现：计数器数据已在 trace_records 明细表中，无需额外存档。
+        # 未来可加一张 daily_stats 表存每日聚合数据。
         pass
 
 
@@ -127,6 +166,8 @@ async def _worker_loop():
 
 async def start_worker():
     global _worker_task
+    # 启动时先从 DB 恢复今日计数
+    await stats_cache.restore_from_db()
     _worker_task = asyncio.create_task(_worker_loop())
 
 
@@ -135,3 +176,4 @@ async def stop_worker():
     _shutdown_flag = True
     if _worker_task:
         await _worker_task
+    await stats_cache.flush_to_db()

@@ -20,7 +20,7 @@ router = APIRouter()
 @router.get("/dashboard/summary", response_model=DashboardSummary)
 async def get_summary(db: AsyncSession = Depends(get_db)):
     """总览：今日实时统计数据"""
-    realtime = stats_cache.get_summary()
+    realtime = await stats_cache.get_summary()
 
     from app.models.api_key import ApiKey
     key_result = await db.execute(

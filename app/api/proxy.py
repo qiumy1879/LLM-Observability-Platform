@@ -1,13 +1,14 @@
 """核心代理端点 — 接收用户请求，转发到真实模型，异步记录观测数据
 
 流程：
-  1. 鉴权（API Key 中间件）
+  1. 鉴权 + 限流（中间件 Depends）
   2. 接收 OpenAI 格式请求体
   3. 转发给真实模型（主链路）
   4. 响应立即返回给用户
   5. 后台异步写入 trace_records + 更新内存计数器
 """
 
+import asyncio
 import json
 import os
 from fastapi import APIRouter, Request, Depends
@@ -55,7 +56,7 @@ async def proxy_chat_completions(request: Request, _=Depends(verify_api_key)):
         api_key=user_llm_key,
     )
 
-    # ── 异步记录观测数据（不阻塞主链路）──
+    # ── 异步记录观测数据（队列满了放弃记录，不阻塞主链路）──
     trace_payload = {
         "api_key_id": request.state.api_key_id,
         "model": model,
@@ -70,10 +71,13 @@ async def proxy_chat_completions(request: Request, _=Depends(verify_api_key)):
         "error_message": result.get("error_message"),
         "trace_id": request.headers.get("X-Trace-Id"),
     }
-    await write_queue.put(trace_payload)
+    try:
+        write_queue.put_nowait(trace_payload)
+    except asyncio.QueueFull:
+        pass  # 队列满了，放弃本次记录但主链路不受影响
 
     # ── 更新内存计数器 ──
-    stats_cache.record(
+    await stats_cache.record(
         api_key_id=request.state.api_key_id,
         model=model,
         cost=result.get("cost", 0.0),
@@ -81,10 +85,11 @@ async def proxy_chat_completions(request: Request, _=Depends(verify_api_key)):
         is_error=(result.get("status") != "success"),
     )
 
-    # ── 返回（OpenAI 兼容格式）──
+    # ── 返回（透传上游状态码）──
     if result.get("status") == "error":
+        upstream_status = result.get("upstream_status_code", 502)
         return JSONResponse(
-            status_code=502,
+            status_code=upstream_status,
             content={
                 "error": {
                     "message": result.get("error_message", "Upstream error"),

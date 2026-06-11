@@ -3,6 +3,7 @@
 import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.api_key import ApiKey
@@ -17,16 +18,24 @@ def _generate_key() -> str:
 
 @router.post("/keys", response_model=ApiKeyResponse, status_code=201)
 async def create_key(payload: ApiKeyCreate, db: AsyncSession = Depends(get_db)):
-    """创建新的 API Key"""
-    key = ApiKey(
-        key=_generate_key(),
-        name=payload.name,
-        rate_limit=payload.rate_limit,
-    )
-    db.add(key)
-    await db.flush()
-    await db.refresh(key)
-    return key
+    """创建新的 API Key（Key 碰撞时自动重试一次）"""
+    for attempt in range(2):
+        key = ApiKey(
+            key=_generate_key(),
+            name=payload.name,
+            rate_limit=payload.rate_limit,
+        )
+        db.add(key)
+        try:
+            await db.flush()
+            await db.refresh(key)
+            return key
+        except IntegrityError:
+            await db.rollback()
+            if attempt == 1:
+                raise HTTPException(status_code=409, detail="Key generation conflict, please try again")
+    # unreachable
+    raise HTTPException(status_code=500, detail="Unexpected error")
 
 
 @router.get("/keys", response_model=list[ApiKeyListItem])

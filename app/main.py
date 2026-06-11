@@ -1,12 +1,15 @@
-"""FastAPI 入口 """
+"""FastAPI 入口"""
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from app.config import settings
 from app.core.database import init_db
 from app.services.write_worker import start_worker, stop_worker, stats_cache
+from app.api import proxy, keys, dashboard
 
 
 @asynccontextmanager
@@ -14,11 +17,9 @@ async def lifespan(app: FastAPI):
     # ── 启动 ──
     await init_db()
     asyncio.create_task(start_worker())
-    print(f"[启动] 数据库已初始化，Worker 已启动")
     yield
     # ── 关闭 ──
     await stop_worker()
-    stats_cache.flush_to_db()  # 停机前最后刷一次
 
 
 app = FastAPI(
@@ -31,7 +32,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # Bearer Token 鉴权，不需要 Cookie
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -44,15 +45,11 @@ async def health():
 
 @app.get("/")
 async def dashboard_page():
-    from fastapi.responses import FileResponse
-    import os
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     return FileResponse(os.path.join(static_dir, "dashboard.html"))
 
 
-# ── 注册路由（延迟导入避免循环依赖）──
-from app.api import proxy, keys, dashboard  # noqa: E402
-
+# ── 注册路由 ──
 app.include_router(proxy.router, tags=["Proxy"])
 app.include_router(keys.router, prefix="/api", tags=["API Keys"])
 app.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
